@@ -25,7 +25,7 @@
 #endif
 
 // Uncomment to run the test suite on boot
-//#define RUN_SELF_TESTS
+// #define RUN_SELF_TESTS
 
 Adafruit_NeoPixel pixels(NUMPIXELS, LED_PIN, NEO_GRB + NEO_KHZ800);
 
@@ -44,10 +44,18 @@ bool zigbee_connected = false;
 bool boot_count_reset = false;
 uint32_t last_zigbee_log = 0;
 
+// NVRAM debouncing variables to protect flash lifespan
+bool nvram_dirty = false;
+unsigned long last_state_change_time = 0;
+const unsigned long NVRAM_WRITE_DELAY =
+    5000; // Debounce NVS writes for 5 seconds (if device shuts off within 5
+          // seconds, the change is lost... acceptable tradeoff for flash
+          // lifespan)
+
 #ifdef RUN_SELF_TESTS
 void runSelfTests() {
   Serial.println("----- STARTING SELF-TESTS -----");
-  
+
   // Test 1: LED Brightness Scaling Math
   Serial.print("Test 1 (LED Scaling): ");
   uint8_t red = 100, green = 150, blue = 200;
@@ -76,7 +84,7 @@ void runSelfTests() {
   testPrefs.remove("test_bool");
   testPrefs.remove("test_val");
   testPrefs.end();
-  
+
   if (loaded_bool == true && loaded_val == 42) {
     Serial.println("PASS");
   } else {
@@ -121,33 +129,46 @@ void updateLEDs() {
 }
 
 /********************* RGB LED functions **************************/
-void setRGBLight(bool state, uint8_t red, uint8_t green, uint8_t blue,
-                 uint8_t level) {
-  led_state = state;
-  led_color_r = red;
-  led_color_g = green;
-  led_color_b = blue;
-  led_level = level;
-  updateLEDs();
-
-  // Always save the state, color, and brightness to NVRAM
+void saveStateToNVRAM() {
   Preferences prefs;
   prefs.begin("light_state", false);
-  prefs.putBool("state", state);
-  prefs.putUChar("r", red);
-  prefs.putUChar("g", green);
-  prefs.putUChar("b", blue);
-  prefs.putUChar("level", level);
+  prefs.putBool("state", led_state);
+  prefs.putUChar("r", led_color_r);
+  prefs.putUChar("g", led_color_g);
+  prefs.putUChar("b", led_color_b);
+  prefs.putUChar("level", led_level);
   prefs.end();
+  nvram_dirty = false;
+  Serial.println("Light state saved to NVRAM.");
 }
 
-// Callback function invoked when the Zigbee coordinator requests device identification (blinking)
+void setRGBLight(bool state, uint8_t red, uint8_t green, uint8_t blue,
+                 uint8_t level) {
+  // Only update and mark dirty if state or parameters actually changed
+  if (led_state != state || led_color_r != red || led_color_g != green ||
+      led_color_b != blue || led_level != level) {
+    led_state = state;
+    led_color_r = red;
+    led_color_g = green;
+    led_color_b = blue;
+    led_level = level;
+    updateLEDs();
+
+    nvram_dirty = true;
+    last_state_change_time = millis();
+  }
+}
+
+// Callback function invoked when the Zigbee coordinator requests device
+// identification (blinking)
 void identify(uint16_t time) {
   static uint8_t blink = 1;
   log_d("Identify called for %d seconds", time);
   if (time == 0) {
-    // If identify time is 0, stop blinking and restore light as it was used for identify
+    // If identify time is 0, stop blinking and restore light as it was used for
+    // identify
     zbColorLight.restoreLight();
+    blink = 1; // Reset blink state for next identify sequence
     return;
   }
 
@@ -165,7 +186,8 @@ void setup() {
 
 #ifdef RUN_SELF_TESTS
   // Wait for serial connection to be ready in test mode
-  while (!Serial && millis() < 4000);
+  while (!Serial && millis() < 4000)
+    ;
   runSelfTests();
 #endif
 
@@ -180,7 +202,8 @@ void setup() {
   bool failsafe_triggered = false;
   if (boot_count >= 3) {
     failsafe_triggered = true;
-    prefs.putUChar("boot_count", 0); // Reset immediately upon triggering override
+    prefs.putUChar("boot_count",
+                   0); // Reset immediately upon triggering override
     led_state = true;
     led_color_r = 255;
     led_color_g = 255;
@@ -201,14 +224,16 @@ void setup() {
   // Wait to ensure serial connection is established before printing logs
   delay(2000);
   if (failsafe_triggered) {
-    Serial.println("Failsafe activated via power toggle! Memory ignored, light forced to 100% white ON.");
+    Serial.println("Failsafe activated via power toggle! Memory ignored, light "
+                   "forced to 100% white ON.");
   }
   Serial.println("Starting XIAO ESP32-C6 Zigbee Light initialization...");
 
   // Configure External Antenna via RF Switch
   // XIAO ESP32-C6 uses standard pins to select internal vs external antenna.
   // WIFI_ENABLE_PIN LOW (activate RF switch logic)
-  // WIFI_ANT_CONFIG_PIN HIGH (selects the associated U.FL connector for the external antenna)
+  // WIFI_ANT_CONFIG_PIN HIGH (selects the associated U.FL connector for the
+  // external antenna)
   pinMode(WIFI_ENABLE_PIN, OUTPUT);
   digitalWrite(WIFI_ENABLE_PIN, LOW);
   delay(10);
@@ -239,7 +264,8 @@ void setup() {
   // When all endpoints are registered, start Zigbee in Router mode
   Serial.println("Starting Zigbee in Router mode...");
 
-  // Initialize the Zigbee stack (set auto_clean to false to retain network pairing details)
+  // Initialize the Zigbee stack (set auto_clean to false to retain network
+  // pairing details)
   if (!Zigbee.begin(ZIGBEE_ROUTER, false)) {
     Serial.println("Error: Zigbee failed to start!");
     Serial.println("Rebooting in 5s...");
@@ -252,13 +278,15 @@ void setup() {
       "Syncing power-on state to Zigbee: %s, R:%d G:%d B:%d Level:%d\n",
       led_state ? "ON" : "OFF", led_color_r, led_color_g, led_color_b,
       led_level);
-  
+
   // Sync the loaded power-on state back to the Zigbee network
-  // We pass the global variables we loaded immediately at power-on to the Zigbee core
+  // We pass the global variables we loaded immediately at power-on to the
+  // Zigbee core
   zbColorLight.setLight(led_state, led_level, led_color_r, led_color_g,
                         led_color_b);
 
-  // If not currently paired, keep the pairing network open for 120 seconds on boot
+  // If not currently paired, keep the pairing network open for 120 seconds on
+  // boot
   Zigbee.setRebootOpenNetwork(120);
 
   Serial.println("Connecting to network in background...");
@@ -273,7 +301,13 @@ void loop() {
     prefs.putUChar("boot_count", 0);
     prefs.end();
     boot_count_reset = true;
-    Serial.println("3 seconds elapsed, power toggle window closed. Boot count reset.");
+    Serial.println(
+        "3 seconds elapsed, power toggle window closed. Boot count reset.");
+  }
+
+  // Non-blocking NVRAM save logic
+  if (nvram_dirty && (millis() - last_state_change_time >= NVRAM_WRITE_DELAY)) {
+    saveStateToNVRAM();
   }
 
   // Non-blocking Zigbee connection check
@@ -283,7 +317,8 @@ void loop() {
       Serial.println("\nSuccess! Zigbee Light connected to network!");
     } else {
       if (millis() - last_zigbee_log > 10000) {
-        Serial.println("\nStill waiting for connection. Ensure Coordinator is in pairing mode.");
+        Serial.println("\nStill waiting for connection. Ensure Coordinator is "
+                       "in pairing mode.");
         last_zigbee_log = millis();
       }
     }
@@ -293,7 +328,7 @@ void loop() {
   if (digitalRead(BOOT_PIN) == LOW) { // Push button pressed
     // Key debounce handling
     delay(100);
-    int startTime = millis();
+    unsigned long startTime = millis();
     while (digitalRead(BOOT_PIN) == LOW) {
       delay(50);
       if ((millis() - startTime) > 3000) {
