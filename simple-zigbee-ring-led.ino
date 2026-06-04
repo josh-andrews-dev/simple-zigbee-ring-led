@@ -90,6 +90,14 @@ bool zigbee_connected = false;
 bool boot_count_reset = false;
 uint32_t last_zigbee_log = 0;
 
+// NVRAM debouncing variables to protect flash lifespan
+bool nvram_dirty = false;
+unsigned long last_state_change_time = 0;
+const unsigned long NVRAM_WRITE_DELAY =
+    5000; // Debounce NVS writes for 5 seconds (if device shuts off within 5
+          // seconds, the change is lost... acceptable tradeoff for flash
+          // lifespan)
+
 #ifdef RUN_SELF_TESTS
 void runSelfTests() {
   Serial.println("----- STARTING SELF-TESTS -----");
@@ -200,26 +208,35 @@ void updateLEDs() {
 }
 
 /********************* RGB LED functions **************************/
-void setRGBLight(bool state, uint8_t red, uint8_t green, uint8_t blue,
-                 uint8_t level) {
-  led_state = state;
-  led_color_r = red;
-  led_color_g = green;
-  led_color_b = blue;
-  led_level = level;
-  updateLEDs();
-
-  // Always save the state, color, and brightness to NVRAM
+void saveStateToNVRAM() {
   Preferences prefs;
   prefs.begin("light_state", false);
-  prefs.putBool("state", state);
-  prefs.putUChar("r", red);
-  prefs.putUChar("g", green);
-  prefs.putUChar("b", blue);
-  prefs.putUChar("level", level);
+  prefs.putBool("state", led_state);
+  prefs.putUChar("r", led_color_r);
+  prefs.putUChar("g", led_color_g);
+  prefs.putUChar("b", led_color_b);
+  prefs.putUChar("level", led_level);
   prefs.end();
+  nvram_dirty = false;
+  Serial.println("Light state saved to NVRAM.");
 }
 
+void setRGBLight(bool state, uint8_t red, uint8_t green, uint8_t blue,
+                 uint8_t level) {
+  // Only update and mark dirty if state or parameters actually changed
+  if (led_state != state || led_color_r != red || led_color_g != green ||
+      led_color_b != blue || led_level != level) {
+    led_state = state;
+    led_color_r = red;
+    led_color_g = green;
+    led_color_b = blue;
+    led_level = level;
+    updateLEDs();
+
+    nvram_dirty = true;
+    last_state_change_time = millis();
+  }
+}
 // Callback function invoked when the Zigbee coordinator requests device
 // identification (blinking)
 void identify(uint16_t time) {
@@ -229,6 +246,7 @@ void identify(uint16_t time) {
     // If identify time is 0, stop blinking and restore light as it was used for
     // identify
     zbColorLight.restoreLight();
+    blink = 1; // Reset blink state for next identify sequence
     return;
   }
 
@@ -382,6 +400,11 @@ void loop() {
         "3 seconds elapsed, power toggle window closed. Boot count reset.");
   }
 
+  // Non-blocking NVRAM save logic
+  if (nvram_dirty && (millis() - last_state_change_time >= NVRAM_WRITE_DELAY)) {
+    saveStateToNVRAM();
+  }
+
   // Non-blocking Zigbee connection check
   if (!zigbee_connected) {
     if (Zigbee.connected()) {
@@ -400,7 +423,7 @@ void loop() {
   if (digitalRead(BOOT_PIN) == LOW) { // Push button pressed
     // Key debounce handling
     delay(100);
-    int startTime = millis();
+    unsigned long startTime = millis();
     while (digitalRead(BOOT_PIN) == LOW) {
       delay(50);
       if ((millis() - startTime) > 3000) {
