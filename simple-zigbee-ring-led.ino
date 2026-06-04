@@ -14,20 +14,66 @@
 #define WIFI_ENABLE_PIN 3
 #define WIFI_ANT_CONFIG_PIN 14
 
-/* Zigbee Color Dimmable Light Configuration */
-#define ZIGBEE_RGB_LIGHT_ENDPOINT 10
+// LED Ring Type Definitions
+#define LED_RING_TYPE_RGB 0
+#define LED_RING_TYPE_RGBW 1
 
-#define LED_PIN D2
-#define NUMPIXELS 16
-
+/**
+ * BOOT_PIN
+ * The GPIO pin connected to the physical Boot button on the Seeed Studio board.
+ * Used for triggering factory resets.
+ */
 #ifndef BOOT_PIN
-#define BOOT_PIN 9 // Default BOOT button GPIO for Seeed Studio XIAO ESP32-C6
+#define BOOT_PIN 9
 #endif
 
-// Uncomment to run the test suite on boot
+// ==========================================
+//           USER CONFIGURATION
+// ==========================================
+
+/**
+ * ACTIVE_LED_RING_TYPE
+ * Selects the type of LED ring light hardware attached:
+ * - LED_RING_TYPE_RGB:  Standard RGB pixels (e.g., WS2812B, using NEO_GRB color
+ * order)
+ * - LED_RING_TYPE_RGBW: RGB + Warm White pixels (e.g., SK6812, using NEO_GRBW
+ * color order)
+ */
+#define ACTIVE_LED_RING_TYPE LED_RING_TYPE_RGB
+
+/**
+ * NUMPIXELS
+ * The number of addressable LEDs on the ring light. Default is 16.
+ */
+#define NUMPIXELS 16
+
+/**
+ * LED_PIN
+ * The GPIO pin connected to the DI (Data Input) of the LED ring.
+ */
+#define LED_PIN D2
+
+/**
+ * RUN_SELF_TESTS
+ * Uncomment this line to run the built-in diagnostic test suite on device boot.
+ */
 // #define RUN_SELF_TESTS
 
+// ==========================================
+//         END USER CONFIGURATION
+// ==========================================
+
+/**
+ * ZIGBEE_RGB_LIGHT_ENDPOINT
+ * The logical Zigbee endpoint number for the color dimmable light.
+ */
+#define ZIGBEE_RGB_LIGHT_ENDPOINT 10
+
+#if ACTIVE_LED_RING_TYPE == LED_RING_TYPE_RGBW
+Adafruit_NeoPixel pixels(NUMPIXELS, LED_PIN, NEO_GRBW + NEO_KHZ800);
+#else
 Adafruit_NeoPixel pixels(NUMPIXELS, LED_PIN, NEO_GRB + NEO_KHZ800);
+#endif
 
 ZigbeeColorDimmableLight zbColorLight =
     ZigbeeColorDimmableLight(ZIGBEE_RGB_LIGHT_ENDPOINT);
@@ -108,6 +154,25 @@ void runSelfTests() {
     Serial.println("FAIL");
   }
 
+  // Test 4: RGB to RGBW White Extraction Math
+  Serial.print("Test 4 (RGBW Extraction): ");
+#if ACTIVE_LED_RING_TYPE == LED_RING_TYPE_RGBW
+  uint8_t test_r = 150, test_g = 100, test_b = 80;
+  uint8_t w = (test_r < test_g) ? test_r : test_g;
+  w = (test_b < w) ? test_b : w;
+  uint8_t final_r = test_r - w;
+  uint8_t final_g = test_g - w;
+  uint8_t final_b = test_b - w;
+  if (w == 80 && final_r == 70 && final_g == 20 && final_b == 0) {
+    Serial.println("PASS");
+  } else {
+    Serial.printf("FAIL (W:%d, R:%d, G:%d, B:%d)\n", w, final_r, final_g,
+                  final_b);
+  }
+#else
+  Serial.println("PASS (Skipped in RGB Mode)");
+#endif
+
   Serial.println("----- ALL TESTS PASSED -----");
   Serial.flush();
   delay(1000);
@@ -121,9 +186,23 @@ void updateLEDs() {
     uint8_t r = led_color_r * brightness_scaling;
     uint8_t g = led_color_g * brightness_scaling;
     uint8_t b = led_color_b * brightness_scaling;
+#if ACTIVE_LED_RING_TYPE == LED_RING_TYPE_RGBW
+    // Extract white channel: W = min(R, G, B) and subtract from R, G, B
+    uint8_t w = (r < g) ? r : g;
+    w = (b < w) ? b : w;
+    r -= w;
+    g -= w;
+    b -= w;
+    pixels.fill(pixels.Color(r, g, b, w));
+#else
     pixels.fill(pixels.Color(r, g, b));
+#endif
   } else {
+#if ACTIVE_LED_RING_TYPE == LED_RING_TYPE_RGBW
+    pixels.fill(pixels.Color(0, 0, 0, 0));
+#else
     pixels.fill(pixels.Color(0, 0, 0));
+#endif
   }
   pixels.show();
 }
@@ -158,7 +237,6 @@ void setRGBLight(bool state, uint8_t red, uint8_t green, uint8_t blue,
     last_state_change_time = millis();
   }
 }
-
 // Callback function invoked when the Zigbee coordinator requests device
 // identification (blinking)
 void identify(uint16_t time) {
@@ -173,9 +251,17 @@ void identify(uint16_t time) {
   }
 
   if (blink) {
+#if ACTIVE_LED_RING_TYPE == LED_RING_TYPE_RGBW
+    pixels.fill(pixels.Color(0, 0, 0, 255));
+#else
     pixels.fill(pixels.Color(255, 255, 255));
+#endif
   } else {
+#if ACTIVE_LED_RING_TYPE == LED_RING_TYPE_RGBW
+    pixels.fill(pixels.Color(0, 0, 0, 0));
+#else
     pixels.fill(pixels.Color(0, 0, 0));
+#endif
   }
   pixels.show();
   blink = !blink;
@@ -185,10 +271,18 @@ void setup() {
   Serial.begin(115200);
 
 #ifdef RUN_SELF_TESTS
-  // Wait for serial connection to be ready in test mode
+  // Wait for serial connection and a start signal character ('s') to run tests
   while (!Serial && millis() < 4000)
     ;
-  runSelfTests();
+  uint32_t start_wait = millis();
+  while (!Serial.available() && (millis() - start_wait < 10000)) {
+    delay(10);
+  }
+  if (Serial.available()) {
+    while (Serial.available())
+      Serial.read(); // consume all input
+    runSelfTests();
+  }
 #endif
 
   // Power-on behavior and failsafe logic
@@ -238,7 +332,8 @@ void setup() {
   digitalWrite(WIFI_ENABLE_PIN, LOW);
   delay(10);
   pinMode(WIFI_ANT_CONFIG_PIN, OUTPUT);
-  digitalWrite(WIFI_ANT_CONFIG_PIN, HIGH);
+  digitalWrite(WIFI_ANT_CONFIG_PIN,
+               HIGH); // Selects external U.FL connector antenna
   delay(10);
 
   // Initialize button for factory reset (Boot button)

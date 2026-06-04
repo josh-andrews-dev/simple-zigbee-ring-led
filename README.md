@@ -35,6 +35,15 @@ Connect the components according to the layout below:
 > [!IMPORTANT]
 > The **5V** pin on the XIAO ESP32-C6 provides power directly from the USB-C connector. This will draw up to ~1A at full brightness. Make sure your power supply provides sufficient current.
 
+> [!IMPORTANT]
+> **External Antenna Required:**
+> You **must** connect the external antenna to the U.FL connector on the Seeed Studio XIAO ESP32-C6 for the Zigbee transceiver to work properly. Without the antenna connected, the device will have extremely poor signal range and will likely fail to pair or communicate with your Zigbee coordinator.
+> 
+> *Note on Internal Antenna:* By default, the firmware selects the external antenna via the board's RF switch pins. If you do not want to use an external antenna and prefer to use the built-in PCB antenna, you must change the following pin setting in `setup()`:
+> ```cpp
+> digitalWrite(WIFI_ANT_CONFIG_PIN, LOW); // Selects internal PCB antenna
+> ```
+
 ---
 
 ## Compilation & IDE Configuration
@@ -65,6 +74,21 @@ arduino-cli compile --fqbn esp32:esp32:XIAO_ESP32C6:CDCOnBoot=cdc,PartitionSchem
 # Upload the sketch (replace <PORT> with your serial port, e.g. /dev/cu.usbmodem1101)
 arduino-cli upload -p <PORT> --fqbn esp32:esp32:XIAO_ESP32C6:CDCOnBoot=cdc,PartitionScheme=zigbee_zczr,ZigbeeMode=zczr simple-zigbee-ring-led.ino
 ```
+
+---
+
+## Firmware Configuration
+
+The top of the main sketch file `simple-zigbee-ring-led.ino` contains a `USER CONFIGURATION` block with options to adapt the firmware for your hardware setup:
+
+| Configuration Macro | Allowed Values | Description |
+|---|---|---|
+| `ACTIVE_LED_RING_TYPE` | `LED_RING_TYPE_RGB` (0) <br> `LED_RING_TYPE_RGBW` (1) | Selects the LED type: Standard RGB (WS2812B, using `NEO_GRB`) or RGB + Warm White (SK6812, using `NEO_GRBW` with dynamic white channel extraction). |
+| `NUMPIXELS` | Integer (e.g. `16`) | The number of addressable LEDs on your ring light. |
+| `LED_PIN` | Pin Label (e.g. `D2`) | The data pin connected to the DI (Data Input) of the LED ring. |
+| `BOOT_PIN` | Pin Number (e.g. `9`) | The GPIO pin of the physical Boot button on the XIAO ESP32-C6 (used for factory reset). |
+| `ZIGBEE_RGB_LIGHT_ENDPOINT` | Integer (e.g. `10`) | Logical endpoint number for the Zigbee Color Dimmable Light. |
+| `RUN_SELF_TESTS` | Uncommented / Commented | Uncomment `#define RUN_SELF_TESTS` to run boot-time logic scaling, NVRAM, and RGBW math checks. |
 
 ---
 
