@@ -39,7 +39,7 @@
  * - LED_RING_TYPE_RGBW: RGB + Warm White pixels (e.g., SK6812, using NEO_GRBW
  * color order)
  */
-#define ACTIVE_LED_RING_TYPE LED_RING_TYPE_RGBW
+#define ACTIVE_LED_RING_TYPE LED_RING_TYPE_RGB
 
 /**
  * NUMPIXELS
