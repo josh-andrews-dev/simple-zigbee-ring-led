@@ -42,6 +42,20 @@
 #define ACTIVE_LED_RING_TYPE LED_RING_TYPE_RGB
 
 /**
+ * RGBW_WHITE_TEMP_MIREDS
+ * Only used when ACTIVE_LED_RING_TYPE is LED_RING_TYPE_RGBW.
+ *
+ * The native color temperature of the dedicated white LED in the SK6812
+ * package, in mireds (1000000 / Kelvin). The default of 333 mireds (3000K)
+ * matches the common warm white variant; use 222 (4500K) for natural white or
+ * 153 (6535K) for cool white.
+ *
+ * Getting this wrong does not break anything, but the ring will lean toward
+ * the real emitter temperature whenever the white channel is driven hard.
+ */
+#define RGBW_WHITE_TEMP_MIREDS 333
+
+/**
  * NUMPIXELS
  * The number of addressable LEDs on the ring light. Default is 16.
  */
@@ -52,6 +66,26 @@
  * The GPIO pin connected to the DI (Data Input) of the LED ring.
  */
 #define LED_PIN D2
+
+/**
+ * COLOR_TEMP_MIN_MIREDS / COLOR_TEMP_MAX_MIREDS
+ * The coolest and warmest color temperatures advertised to the Zigbee network,
+ * in mireds (1000000 / Kelvin). Defaults span 6535K (153) to 3000K (333).
+ *
+ * On RGBW rings, keeping the warm end at RGBW_WHITE_TEMP_MIREDS means the
+ * white LED runs at full output across the whole range and RGB only ever adds
+ * the blue lift for cooler targets. Going warmer than that is possible, but
+ * the white LED has to back off and RGB carries an increasing share, which
+ * renders as amber rather than warm white.
+ *
+ * These must be advertised explicitly. The Zigbee library registers the
+ * ColorTempPhysicalMinMireds/MaxMireds attributes with placeholder defaults of
+ * 0x0000 and 0xFEFF, which coordinators read back as a 15K-6535K range.
+ * Requesting the 15K end yields 66666 mireds, which overflows the uint16_t the
+ * attribute is transported in and makes the command fail outright.
+ */
+#define COLOR_TEMP_MIN_MIREDS 153
+#define COLOR_TEMP_MAX_MIREDS 333
 
 /**
  * RUN_SELF_TESTS
@@ -78,12 +112,20 @@ Adafruit_NeoPixel pixels(NUMPIXELS, LED_PIN, NEO_GRB + NEO_KHZ800);
 ZigbeeColorDimmableLight zbColorLight =
     ZigbeeColorDimmableLight(ZIGBEE_RGB_LIGHT_ENDPOINT);
 
+// Color modes. The ring is always driven as RGB, but we track whether the
+// network last set a color or a color temperature so the correct mode is
+// restored and reported back after a power cycle.
+#define COLOR_MODE_RGB 0
+#define COLOR_MODE_TEMP 1
+
 // Global variables to store current LED state
 bool led_state = false;
 uint8_t led_level = 255;
 uint8_t led_color_r = 255;
 uint8_t led_color_g = 255;
 uint8_t led_color_b = 255;
+uint8_t led_color_mode = COLOR_MODE_RGB;
+uint16_t led_color_temp = 250; // mireds (4000K)
 
 // Variables for connection and memory tracking
 bool zigbee_connected = false;
@@ -97,6 +139,79 @@ const unsigned long NVRAM_WRITE_DELAY =
     5000; // Debounce NVS writes for 5 seconds (if device shuts off within 5
           // seconds, the change is lost... acceptable tradeoff for flash
           // lifespan)
+
+/**
+ * Converts a color temperature in mireds to an approximate RGB triplet using
+ * Tanner Helland's blackbody approximation. Overall brightness is left to
+ * led_level; this only sets the hue of the white point.
+ */
+void colorTempToRGB(uint16_t mireds, uint8_t &red, uint8_t &green,
+                    uint8_t &blue) {
+  if (mireds < 1) {
+    mireds = 1;
+  }
+  // The approximation is only defined between 1000K and 40000K
+  float kelvin = 1000000.0f / (float)mireds;
+  kelvin = constrain(kelvin, 1000.0f, 40000.0f);
+
+  float temp = kelvin / 100.0f;
+  float r, g, b;
+  if (temp <= 66.0f) {
+    r = 255.0f;
+    g = 99.4708025861f * log(temp) - 161.1195681661f;
+    b = (temp <= 19.0f) ? 0.0f
+                        : 138.5177312231f * log(temp - 10.0f) - 305.0447927307f;
+  } else {
+    r = 329.698727446f * pow(temp - 60.0f, -0.1332047592f);
+    g = 288.1221695283f * pow(temp - 60.0f, -0.0755148492f);
+    b = 255.0f;
+  }
+
+  red = (uint8_t)constrain(r, 0.0f, 255.0f);
+  green = (uint8_t)constrain(g, 0.0f, 255.0f);
+  blue = (uint8_t)constrain(b, 0.0f, 255.0f);
+}
+
+#if ACTIVE_LED_RING_TYPE == LED_RING_TYPE_RGBW
+/**
+ * Splits an RGB target into RGB + white channels for SK6812 rings.
+ *
+ * Mixes in as much of the white LED as possible without requiring a negative
+ * RGB channel to compensate. Because the white emitter has its own color
+ * temperature, this is not the same as W = min(R, G, B): a plain minimum
+ * assumes the white LED is neutral, so on a warm white part it drags cool
+ * targets toward orange, worst of all near-white ones where the minimum
+ * captures nearly the entire output.
+ */
+void extractWhiteChannel(uint8_t &red, uint8_t &green, uint8_t &blue,
+                         uint8_t &white) {
+  static bool white_point_ready = false;
+  static uint8_t white_r, white_g, white_b;
+  if (!white_point_ready) {
+    colorTempToRGB(RGBW_WHITE_TEMP_MIREDS, white_r, white_g, white_b);
+    white_point_ready = true;
+  }
+
+  // Largest white level whose contribution still fits under every channel
+  uint32_t w = 255;
+  if (white_r > 0 && (uint32_t)red * 255 / white_r < w) {
+    w = (uint32_t)red * 255 / white_r;
+  }
+  if (white_g > 0 && (uint32_t)green * 255 / white_g < w) {
+    w = (uint32_t)green * 255 / white_g;
+  }
+  if (white_b > 0 && (uint32_t)blue * 255 / white_b < w) {
+    w = (uint32_t)blue * 255 / white_b;
+  }
+
+  // Subtract what the white LED already supplies; w is chosen so that none of
+  // these can underflow
+  white = (uint8_t)w;
+  red -= (uint8_t)(w * white_r / 255);
+  green -= (uint8_t)(w * white_g / 255);
+  blue -= (uint8_t)(w * white_b / 255);
+}
+#endif
 
 #ifdef RUN_SELF_TESTS
 void runSelfTests() {
@@ -157,21 +272,59 @@ void runSelfTests() {
   // Test 4: RGB to RGBW White Extraction Math
   Serial.print("Test 4 (RGBW Extraction): ");
 #if ACTIVE_LED_RING_TYPE == LED_RING_TYPE_RGBW
-  uint8_t test_r = 150, test_g = 100, test_b = 80;
-  uint8_t w = (test_r < test_g) ? test_r : test_g;
-  w = (test_b < w) ? test_b : w;
-  uint8_t final_r = test_r - w;
-  uint8_t final_g = test_g - w;
-  uint8_t final_b = test_b - w;
-  if (w == 80 && final_r == 70 && final_g == 20 && final_b == 0) {
+  uint8_t tr, tg, tb, tw;
+
+  // A target at the white LED's own temperature must drive it alone
+  colorTempToRGB(RGBW_WHITE_TEMP_MIREDS, tr, tg, tb);
+  extractWhiteChannel(tr, tg, tb, tw);
+  bool native_ok = (tw == 255 && tr == 0 && tg == 0 && tb == 0);
+
+  // Targets are derived from the white point rather than the advertised range,
+  // so this exercises the algorithm whatever the range is configured to.
+
+  // Cooler than the white LED: RGB tops it up, blue leading
+  colorTempToRGB(RGBW_WHITE_TEMP_MIREDS / 2, tr, tg, tb);
+  extractWhiteChannel(tr, tg, tb, tw);
+  bool cooler_ok = (tb > tg);
+
+  // Warmer than the white LED: it has to back off and let red carry
+  colorTempToRGB(RGBW_WHITE_TEMP_MIREDS * 3 / 2, tr, tg, tb);
+  extractWhiteChannel(tr, tg, tb, tw);
+  bool warmer_ok = (tw < 255 && tr > 0);
+
+  // A saturated color has no white content to extract
+  tr = 255;
+  tg = 0;
+  tb = 0;
+  extractWhiteChannel(tr, tg, tb, tw);
+  bool saturated_ok = (tw == 0 && tr == 255);
+
+  if (native_ok && cooler_ok && warmer_ok && saturated_ok) {
     Serial.println("PASS");
   } else {
-    Serial.printf("FAIL (W:%d, R:%d, G:%d, B:%d)\n", w, final_r, final_g,
-                  final_b);
+    Serial.printf("FAIL (Native:%d, Cooler:%d, Warmer:%d, Saturated:%d)\n",
+                  native_ok, cooler_ok, warmer_ok, saturated_ok);
   }
 #else
   Serial.println("PASS (Skipped in RGB Mode)");
 #endif
+
+  // Test 5: Color Temperature (mireds) to RGB conversion
+  Serial.print("Test 5 (Color Temp Conversion): ");
+  // Fixed reference points: the conversion is a pure function and does not
+  // depend on the range the device happens to advertise
+  uint8_t ct_r, ct_g, ct_b;
+  // 500 mireds (2000K): deep amber, red saturated and almost no blue
+  colorTempToRGB(500, ct_r, ct_g, ct_b);
+  bool warm_ok = (ct_r == 255 && ct_g > 100 && ct_g < 180 && ct_b < 40);
+  // 153 mireds (~6535K): near white
+  colorTempToRGB(153, ct_r, ct_g, ct_b);
+  bool cool_ok = (ct_r == 255 && ct_g > 230 && ct_b > 230);
+  if (warm_ok && cool_ok) {
+    Serial.println("PASS");
+  } else {
+    Serial.printf("FAIL (Warm:%d, Cool:%d)\n", warm_ok, cool_ok);
+  }
 
   Serial.println("----- ALL TESTS PASSED -----");
   Serial.flush();
@@ -187,12 +340,9 @@ void updateLEDs() {
     uint8_t g = led_color_g * brightness_scaling;
     uint8_t b = led_color_b * brightness_scaling;
 #if ACTIVE_LED_RING_TYPE == LED_RING_TYPE_RGBW
-    // Extract white channel: W = min(R, G, B) and subtract from R, G, B
-    uint8_t w = (r < g) ? r : g;
-    w = (b < w) ? b : w;
-    r -= w;
-    g -= w;
-    b -= w;
+    // Offload as much output as possible onto the dedicated white LED
+    uint8_t w;
+    extractWhiteChannel(r, g, b, w);
     pixels.fill(pixels.Color(r, g, b, w));
 #else
     pixels.fill(pixels.Color(r, g, b));
@@ -216,6 +366,8 @@ void saveStateToNVRAM() {
   prefs.putUChar("g", led_color_g);
   prefs.putUChar("b", led_color_b);
   prefs.putUChar("level", led_level);
+  prefs.putUChar("cmode", led_color_mode);
+  prefs.putUShort("ctemp", led_color_temp);
   prefs.end();
   nvram_dirty = false;
   Serial.println("Light state saved to NVRAM.");
@@ -225,12 +377,37 @@ void setRGBLight(bool state, uint8_t red, uint8_t green, uint8_t blue,
                  uint8_t level) {
   // Only update and mark dirty if state or parameters actually changed
   if (led_state != state || led_color_r != red || led_color_g != green ||
-      led_color_b != blue || led_level != level) {
+      led_color_b != blue || led_level != level ||
+      led_color_mode != COLOR_MODE_RGB) {
     led_state = state;
     led_color_r = red;
     led_color_g = green;
     led_color_b = blue;
     led_level = level;
+    led_color_mode = COLOR_MODE_RGB;
+    updateLEDs();
+
+    nvram_dirty = true;
+    last_state_change_time = millis();
+  }
+}
+
+// Invoked when the coordinator sends a Move to Color Temperature command. The
+// ring has no dedicated white point, so the temperature is rendered as RGB.
+void setColorTempLight(bool state, uint8_t level, uint16_t color_temperature) {
+  uint8_t red, green, blue;
+  colorTempToRGB(color_temperature, red, green, blue);
+
+  if (led_state != state || led_level != level ||
+      led_color_temp != color_temperature ||
+      led_color_mode != COLOR_MODE_TEMP) {
+    led_state = state;
+    led_level = level;
+    led_color_temp = color_temperature;
+    led_color_mode = COLOR_MODE_TEMP;
+    led_color_r = red;
+    led_color_g = green;
+    led_color_b = blue;
     updateLEDs();
 
     nvram_dirty = true;
@@ -303,12 +480,15 @@ void setup() {
     led_color_g = 255;
     led_color_b = 255;
     led_level = 255;
+    led_color_mode = COLOR_MODE_RGB;
   } else {
     led_state = prefs.getBool("state", true); // Load state (default ON)
     led_color_r = prefs.getUChar("r", 255);
     led_color_g = prefs.getUChar("g", 255);
     led_color_b = prefs.getUChar("b", 255);
     led_level = prefs.getUChar("level", 255);
+    led_color_mode = prefs.getUChar("cmode", COLOR_MODE_RGB);
+    led_color_temp = prefs.getUShort("ctemp", 250);
   }
   prefs.end();
 
@@ -339,12 +519,27 @@ void setup() {
   // Initialize button for factory reset (Boot button)
   pinMode(BOOT_PIN, INPUT_PULLUP);
 
-  // Enable XY (RGB) capabilities
-  uint16_t capabilities = ZIGBEE_COLOR_CAPABILITY_X_Y;
+  // Enable XY, Hue/Saturation and Color Temperature capabilities.
+  // Color temperature must be declared here before the physical mireds range
+  // can be set below; the library rejects the range otherwise.
+  uint16_t capabilities = ZIGBEE_COLOR_CAPABILITY_X_Y |
+                          ZIGBEE_COLOR_CAPABILITY_HUE_SATURATION |
+                          ZIGBEE_COLOR_CAPABILITY_COLOR_TEMP;
   zbColorLight.setLightColorCapabilities(capabilities);
 
-  // Set callback for color/state updates from the Zigbee network
+  // Do not drop this call. The Zigbee library registers the
+  // ColorTempPhysicalMinMireds/MaxMireds attributes with placeholder defaults
+  // of 0x0000 and 0xFEFF, which coordinators read back as a 15K-6535K range.
+  // Asking for the 15K end yields 66666 mireds, overflowing the uint16_t the
+  // attribute travels in, and the command fails before reaching the device.
+  if (!zbColorLight.setLightColorTemperatureRange(COLOR_TEMP_MIN_MIREDS,
+                                                  COLOR_TEMP_MAX_MIREDS)) {
+    Serial.println("Warning: failed to set color temperature range!");
+  }
+
+  // Set callbacks for color/state updates from the Zigbee network
   zbColorLight.onLightChangeRgb(setRGBLight);
+  zbColorLight.onLightChangeTemp(setColorTempLight);
 
   // Set callback function for device identify
   zbColorLight.onIdentify(identify);
@@ -369,16 +564,31 @@ void setup() {
   }
   Serial.println("Zigbee started successfully. Connecting to network...");
 
-  Serial.printf(
-      "Syncing power-on state to Zigbee: %s, R:%d G:%d B:%d Level:%d\n",
-      led_state ? "ON" : "OFF", led_color_r, led_color_g, led_color_b,
-      led_level);
+  // setLight() below reports the color as XY, which makes the Zigbee core fire
+  // the RGB callback and overwrite led_color_mode. Capture what was loaded from
+  // NVRAM first, otherwise the color temperature mode can never be restored.
+  uint8_t restore_color_mode = led_color_mode;
+  uint16_t restore_color_temp = led_color_temp;
+
+  Serial.printf("Syncing power-on state to Zigbee: %s, R:%d G:%d B:%d "
+                "Level:%d Mode:%s\n",
+                led_state ? "ON" : "OFF", led_color_r, led_color_g, led_color_b,
+                led_level,
+                restore_color_mode == COLOR_MODE_TEMP ? "TEMP" : "RGB");
 
   // Sync the loaded power-on state back to the Zigbee network
   // We pass the global variables we loaded immediately at power-on to the
   // Zigbee core
   zbColorLight.setLight(led_state, led_level, led_color_r, led_color_g,
                         led_color_b);
+
+  // Re-assert color temperature mode if that is what was in use before the
+  // power cycle; this also puts led_color_mode back to COLOR_MODE_TEMP
+  if (restore_color_mode == COLOR_MODE_TEMP) {
+    Serial.printf("Restoring color temperature: %u mireds\n",
+                  restore_color_temp);
+    zbColorLight.setLightColorTemperature(restore_color_temp);
+  }
 
   // If not currently paired, keep the pairing network open for 120 seconds on
   // boot
