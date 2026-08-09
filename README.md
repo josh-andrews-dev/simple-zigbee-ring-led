@@ -84,11 +84,14 @@ The top of the main sketch file `simple-zigbee-ring-led.ino` contains a `USER CO
 | Configuration Macro | Allowed Values | Description |
 |---|---|---|
 | `ACTIVE_LED_RING_TYPE` | `LED_RING_TYPE_RGB` (0) <br> `LED_RING_TYPE_RGBW` (1) | Selects the LED type: Standard RGB (WS2812B, using `NEO_GRB`) or RGB + Warm White (SK6812, using `NEO_GRBW` with dynamic white channel extraction). |
+| `RGBW_WHITE_TEMP_MIREDS` | Integer (e.g. `333`) | RGBW rings only. The native color temperature of the SK6812's white LED, in mireds. `333` = 3000K (warm white), `222` = 4500K (natural), `153` ≈ 6535K (cool). |
 | `NUMPIXELS` | Integer (e.g. `16`) | The number of addressable LEDs on your ring light. |
 | `LED_PIN` | Pin Label (e.g. `D2`) | The data pin connected to the DI (Data Input) of the LED ring. |
+| `COLOR_TEMP_MIN_MIREDS` | Integer (e.g. `153`) | Coolest color temperature advertised to the coordinator, in mireds. `153` mireds ≈ 6535K. |
+| `COLOR_TEMP_MAX_MIREDS` | Integer (e.g. `333`) | Warmest color temperature advertised to the coordinator, in mireds. `333` mireds = 3000K. On RGBW rings, matching this to `RGBW_WHITE_TEMP_MIREDS` keeps the white LED at full output across the entire range. |
 | `BOOT_PIN` | Pin Number (e.g. `9`) | The GPIO pin of the physical Boot button on the XIAO ESP32-C6 (used for factory reset). |
 | `ZIGBEE_RGB_LIGHT_ENDPOINT` | Integer (e.g. `10`) | Logical endpoint number for the Zigbee Color Dimmable Light. |
-| `RUN_SELF_TESTS` | Uncommented / Commented | Uncomment `#define RUN_SELF_TESTS` to run boot-time logic scaling, NVRAM, and RGBW math checks. |
+| `RUN_SELF_TESTS` | Uncommented / Commented | Uncomment `#define RUN_SELF_TESTS` to run boot-time logic scaling, NVRAM, RGBW, and color temperature math checks. |
 
 ---
 
@@ -114,16 +117,21 @@ If you need to pair the device to a new coordinator or reset the connection:
 Because this device is mains-powered (via USB-C), it functions as a **Zigbee Router**. It will automatically route Zigbee packets for nearby devices, strengthening your home automation mesh network.
 
 ### 2. State Retention & Restore
-Upon normal boot, the microcontroller loads its last known power state (ON/OFF), color, and brightness from non-volatile memory (NVRAM) and restores it instantly. It also synchronizes this state back to the Zigbee network coordinator.
+Upon normal boot, the microcontroller loads its last known power state (ON/OFF), color, brightness, and color mode from non-volatile memory (NVRAM) and restores it instantly. It also synchronizes this state back to the Zigbee network coordinator.
 
-### 3. Failsafe Override Mode
+### 3. Color & Color Temperature Control
+The device advertises XY, Hue/Saturation, and Color Temperature capabilities, so hubs can drive it from either a color wheel or a white-temperature slider. Color temperatures are rendered using a blackbody approximation across the 3000K–6535K range, and whichever mode was last used is persisted and re-asserted after a power cycle.
+
+On RGBW rings the dedicated white LED is not treated as neutral. The firmware subtracts as much of that LED's *own* color temperature (`RGBW_WHITE_TEMP_MIREDS`) as it can before topping up with RGB, so the white emitter carries the bulk of the output near its native temperature, RGB adds the blue lift for cooler targets, and RGB takes over entirely for targets warmer than the emitter can reach.
+
+### 4. Failsafe Override Mode
 If you toggle the power switch **three times** rapidly (with less than 3 seconds of uptime on each boot), the device will trigger a failsafe bypass:
 *   Bypasses NVRAM state load.
 *   Forces the LEDs to **100% white ON**.
 *   Resets the boot counter.
 This acts as a hardware bypass if the device becomes unresponsive or loses its Zigbee connection and you need light immediately.
 
-### 4. Factory Reset
+### 5. Factory Reset
 To reset the device to factory default settings and clear its Zigbee pairing data:
 1.  Press and hold the physical **BOOT button** (GPIO 9) on the XIAO ESP32-C6.
 2.  Keep it pressed for at least **3 seconds**.
