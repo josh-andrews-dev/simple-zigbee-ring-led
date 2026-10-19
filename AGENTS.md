@@ -16,7 +16,6 @@ missing today:
 - A Linux GitHub Actions workflow that compiles the sketch on every PR.
 - A `vX.Y.Z` tag with release notes for each build flashed to a device (none exist; two
   devices in the house run an unknown build).
-- A Notion tracker (prefix chosen by the agent) instead of none.
 - This is a public repo with no LICENSE; Josh chose to leave it that way (2026-10-09).
 
 Rules that apply now, even before that work: every change by pull request into `main`,
