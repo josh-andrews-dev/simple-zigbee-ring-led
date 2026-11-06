@@ -75,6 +75,27 @@ arduino-cli compile --fqbn esp32:esp32:XIAO_ESP32C6:CDCOnBoot=cdc,PartitionSchem
 arduino-cli upload -p <PORT> --fqbn esp32:esp32:XIAO_ESP32C6:CDCOnBoot=cdc,PartitionScheme=zigbee_zczr,ZigbeeMode=zczr simple-zigbee-ring-led.ino
 ```
 
+### Building from a folder with a different name
+`arduino-cli` requires the sketch folder's name to match the `.ino` file's name. The commands above work only when the checkout's folder is named `simple-zigbee-ring-led`. From any other folder (a git worktree, a renamed clone, a CI workspace) the compile fails with:
+
+```text
+Can't open sketch: main file missing from sketch: .../<folder-name>/<folder-name>.ino
+```
+
+Copy the sketch into a folder with the matching name and build that folder:
+
+```bash
+BUILD_DIR="$(mktemp -d)/simple-zigbee-ring-led"
+mkdir -p "$BUILD_DIR"
+cp simple-zigbee-ring-led.ino "$BUILD_DIR/"
+arduino-cli compile --fqbn esp32:esp32:XIAO_ESP32C6:CDCOnBoot=cdc,PartitionScheme=zigbee_zczr,ZigbeeMode=zczr "$BUILD_DIR"
+```
+
+### Optional board options
+Append these to the FQBN, comma-separated (for example `...,ZigbeeMode=zczr,DebugLevel=info`):
+*   `DebugLevel=info` turns on the ESP32 core's log output, including the Zigbee stack's join and reboot messages, which the default `DebugLevel=none` leaves out.
+*   `EraseFlash=all` (on upload) erases the whole flash first, including the stored Zigbee pairing and saved light state, so the device re-pairs from scratch.
+
 ---
 
 ## Firmware Configuration
