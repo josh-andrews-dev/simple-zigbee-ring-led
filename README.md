@@ -112,7 +112,7 @@ The top of the main sketch file `simple-zigbee-ring-led.ino` contains a `USER CO
 | `COLOR_TEMP_MAX_MIREDS` | Integer (e.g. `333`) | Warmest color temperature advertised to the coordinator, in mireds. `333` mireds = 3000K. On RGBW rings, matching this to `RGBW_WHITE_TEMP_MIREDS` keeps the white LED at full output across the entire range. |
 | `BOOT_PIN` | Pin Number (e.g. `9`) | The GPIO pin of the physical Boot button on the XIAO ESP32-C6 (used for factory reset). |
 | `ZIGBEE_RGB_LIGHT_ENDPOINT` | Integer (e.g. `10`) | Logical endpoint number for the Zigbee Color Dimmable Light. |
-| `RUN_SELF_TESTS` | Uncommented / Commented | Uncomment `#define RUN_SELF_TESTS` to run boot-time logic scaling, NVRAM, RGBW, and color temperature math checks. |
+| `RUN_SELF_TESTS` | Uncommented / Commented | Uncomment `#define RUN_SELF_TESTS` to enable boot-time logic scaling, NVRAM, RGBW, and color temperature math checks. They run only if a character arrives over serial within 10 seconds of boot. |
 
 ---
 
@@ -121,14 +121,14 @@ The top of the main sketch file `simple-zigbee-ring-led.ino` contains a `USER CO
 ### Initial Pairing
 1. Set your Zigbee hub/coordinator (e.g., Zigbee2MQTT, Hubitat, Home Assistant ZHA) into **Permit Join / Pairing Mode**.
 2. Power on the device by plugging in the USB-C cable.
-3. The device will automatically enter pairing mode for **120 seconds** on boot if it is not currently paired.
+3. If it is not currently paired, the device starts searching for a network to join on boot and keeps retrying until it joins.
 4. The hub should discover the device as **Simple Zigbee Ring LED** manufactured by **Josh Andrews**.
 
 ### Re-pairing / Factory Reset
 If you need to pair the device to a new coordinator or reset the connection:
 1. Put your Zigbee hub into **Pairing Mode**.
 2. While the device is powered on, press and hold the physical **BOOT button** (GPIO 9) on the Seeed Studio board for at least **3 seconds**.
-3. Release the button. The board will wipe its stored pairing database, reboot, and enter the 120-second pairing window automatically.
+3. Release the button. The board will wipe its stored pairing database, reboot, and start searching for a network to join.
 
 ---
 
@@ -143,7 +143,7 @@ Upon normal boot, the microcontroller loads its last known power state (ON/OFF),
 ### 3. Color & Color Temperature Control
 The device advertises XY, Hue/Saturation, and Color Temperature capabilities, so hubs can drive it from either a color wheel or a white-temperature slider. Color temperatures are rendered using a blackbody approximation across the 3000K–6535K range, and whichever mode was last used is persisted and re-asserted after a power cycle.
 
-On RGBW rings the dedicated white LED is not treated as neutral. The firmware subtracts as much of that LED's *own* color temperature (`RGBW_WHITE_TEMP_MIREDS`) as it can before topping up with RGB, so the white emitter carries the bulk of the output near its native temperature, RGB adds the blue lift for cooler targets, and RGB takes over entirely for targets warmer than the emitter can reach.
+On RGBW rings the dedicated white LED is not treated as neutral. The firmware subtracts as much of that LED's *own* color temperature (`RGBW_WHITE_TEMP_MIREDS`) as it can before topping up with RGB, so the white emitter carries the bulk of the output near its native temperature, RGB adds the blue lift for cooler targets, and for targets warmer than the emitter can reach the white LED backs off while RGB carries an increasing share.
 
 ### 4. Failsafe Override Mode
 If you toggle the power switch **three times** rapidly (with less than 3 seconds of uptime on each boot), the device will trigger a failsafe bypass:
@@ -153,7 +153,7 @@ If you toggle the power switch **three times** rapidly (with less than 3 seconds
 This acts as a hardware bypass if the device becomes unresponsive or loses its Zigbee connection and you need light immediately.
 
 ### 5. Factory Reset
-To reset the device to factory default settings and clear its Zigbee pairing data:
+To clear the device's Zigbee pairing data (this keeps the saved light state; `EraseFlash=all` above clears both):
 1.  Press and hold the physical **BOOT button** (GPIO 9) on the XIAO ESP32-C6.
 2.  Keep it pressed for at least **3 seconds**.
 3.  The board serial console will print a reset message, clear the pairing data, and reboot the device in pairing mode.
