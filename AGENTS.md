@@ -19,4 +19,4 @@ dev-manager's `standards/observed.md`. What this repo is missing today:
 - This is a public repo with no LICENSE; Josh chose to leave it that way (2026-10-09).
 
 Outside contributors: changes reach `main` only by a squash-merged pull request; the repo's
-ruleset enforces it.
+ruleset requires the pull request and its merge settings allow only squash.
