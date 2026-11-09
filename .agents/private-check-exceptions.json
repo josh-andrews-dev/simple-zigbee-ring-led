@@ -1,0 +1,14 @@
+{
+  "exceptions": [
+    {
+      "where": "README.md",
+      "category": "person",
+      "reason": "author credit"
+    },
+    {
+      "where": "simple-zigbee-ring-led.ino",
+      "category": "person",
+      "reason": "author credit"
+    }
+  ]
+}
